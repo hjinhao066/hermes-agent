@@ -320,6 +320,45 @@ def _script_argv(path: Path) -> tuple[Optional[list[str]], dict[str, str], Optio
     return [python_exe, str(path)], env_overlay, None
 
 
+_WINDOWS_TRANSIENT_SCRIPT_EXIT_CODES = {
+    0xC0000017,  # STATUS_NO_MEMORY
+    0xC000009A,  # STATUS_INSUFFICIENT_RESOURCES
+    0xC000012D,  # STATUS_COMMITMENT_LIMIT
+    0xC0000142,  # STATUS_DLL_INIT_FAILED
+}
+_WINDOWS_TRANSIENT_SPAWN_ERRORS = {
+    8,     # ERROR_NOT_ENOUGH_MEMORY
+    14,    # ERROR_OUTOFMEMORY
+    1450,  # ERROR_NO_SYSTEM_RESOURCES
+    1455,  # ERROR_COMMITMENT_LIMIT
+}
+# Commit pressure on Windows can outlive the first couple of process launches.
+# Keep retrying only the explicitly classified pre-initialization failures;
+# the longest possible backoff (21.25s) stays well below common cron cadences.
+_SCRIPT_RESOURCE_RETRY_DELAYS = (0.25, 1.0, 5.0, 15.0)
+
+
+def _is_transient_windows_script_exit(returncode: int) -> bool:
+    return (
+        sys.platform == "win32"
+        and (int(returncode) & 0xFFFFFFFF) in _WINDOWS_TRANSIENT_SCRIPT_EXIT_CODES
+    )
+
+
+def _is_transient_windows_spawn_error(exc: BaseException) -> bool:
+    if sys.platform != "win32":
+        return False
+    if isinstance(exc, OSError):
+        return getattr(exc, "winerror", None) in _WINDOWS_TRANSIENT_SPAWN_ERRORS
+    # subprocess.run(capture_output=True) starts pipe-reader threads on Windows.
+    # Under short-lived system resource pressure Thread.start() raises this
+    # RuntimeError after Popen has already cleaned up the child process.
+    return (
+        isinstance(exc, RuntimeError)
+        and str(exc).strip().casefold() == "can't start new thread"
+    )
+
+
 def _run_job_script(
     script_path: str, workdir: Optional[str] = None,
     cancel_event: Optional[_CancelEventLike] = None,
@@ -374,33 +413,53 @@ def _run_job_script(
         # Use the job's workdir as the subprocess cwd when configured, otherwise default to the scripts-dir
         # parent (back-compat). NEVER mutate the Python process cwd — that would leak into concurrent
         # gateway sessions (#69396).
-        proc = subprocess.Popen(
-            argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-            cwd=workdir or str(path.parent), env=env, **popen_kwargs)
         deadline = time.monotonic() + script_timeout
-        while True:
-            # Tree-kill on cancel AND timeout: killpg misses setsid grandchildren (watchdogs,
-            # backgrounded shell jobs); kill_process_tree snapshots descendants BEFORE signalling.
-            if cancel_event is not None and cancel_event.is_set():
-                _terminate_cron_script_tree(proc)
-                _drain_script_pipes(proc)
+        for attempt in range(len(_SCRIPT_RESOURCE_RETRY_DELAYS) + 1):
+            if attempt and cancel_event is not None and cancel_event.is_set():
                 return False, "Script cancelled because cron fire ownership was lost"
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                _terminate_cron_script_tree(proc)
-                _drain_script_pipes(proc)
-                # Phase 4a (#85125): a script timeout must leave ZERO living descendants. killpg only
-                # reaches the script's own process group — a grandchild that called setsid (backgrounded
-                # shell jobs, watchdogs) escapes it and keeps running after the job reports failure (#71148
-                # / #59549). agent.deadline.kill_process_tree snapshots the descendant set via psutil BEFORE
-                # signalling, so own-session grandchildren are reached too — the unified deadline layer's
-                # tree-kill (#85147, d6a5cb9725).
+            if time.monotonic() >= deadline:
                 return False, f"Script timed out after {script_timeout}s: {path}"
             try:
-                stdout_raw, stderr_raw = proc.communicate(timeout=min(0.1, remaining))
-                break
-            except subprocess.TimeoutExpired:
+                proc = subprocess.Popen(
+                    argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                    cwd=workdir or str(path.parent), env=env, **popen_kwargs)
+            except (OSError, RuntimeError) as exc:
+                if attempt >= len(_SCRIPT_RESOURCE_RETRY_DELAYS) or not _is_transient_windows_spawn_error(exc):
+                    raise
+                delay = min(_SCRIPT_RESOURCE_RETRY_DELAYS[attempt], max(0, deadline - time.monotonic()))
+                logger.warning("Cron script %s: transient Windows spawn error; retrying in %.2fs", path.name, delay)
+                time.sleep(delay)
                 continue
+            while True:
+                # Tree-kill on cancel AND timeout: killpg misses setsid grandchildren (watchdogs,
+                # backgrounded shell jobs); kill_process_tree snapshots descendants BEFORE signalling.
+                if cancel_event is not None and cancel_event.is_set():
+                    _terminate_cron_script_tree(proc)
+                    _drain_script_pipes(proc)
+                    return False, "Script cancelled because cron fire ownership was lost"
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    _terminate_cron_script_tree(proc)
+                    _drain_script_pipes(proc)
+                    # Phase 4a (#85125): a script timeout must leave ZERO living descendants. killpg only
+                    # reaches the script's own process group — a grandchild that called setsid (backgrounded
+                    # shell jobs, watchdogs) escapes it and keeps running after the job reports failure (#71148
+                    # / #59549). agent.deadline.kill_process_tree snapshots the descendant set via psutil BEFORE
+                    # signalling, so own-session grandchildren are reached too — the unified deadline layer's
+                    # tree-kill (#85147, d6a5cb9725).
+                    return False, f"Script timed out after {script_timeout}s: {path}"
+                try:
+                    stdout_raw, stderr_raw = proc.communicate(timeout=min(0.1, remaining))
+                    break
+                except subprocess.TimeoutExpired:
+                    continue
+
+            if attempt < len(_SCRIPT_RESOURCE_RETRY_DELAYS) and _is_transient_windows_script_exit(proc.returncode):
+                delay = min(_SCRIPT_RESOURCE_RETRY_DELAYS[attempt], max(0, deadline - time.monotonic()))
+                logger.warning("Cron script %s: Windows initialization status 0x%08X; retrying in %.2fs", path.name, int(proc.returncode) & 0xFFFFFFFF, delay)
+                time.sleep(delay)
+                continue
+            break
 
         stdout = (stdout_raw or "").strip()
         stderr = (stderr_raw or "").strip()

@@ -1136,7 +1136,7 @@ _QUICK_STATE_FILES = (
     "feishu_comment_pairing.json",      # Feishu comment subscription pairings
 )
 
-_QUICK_DEFAULT_KEEP = 20
+_QUICK_DEFAULT_KEEP = 3
 
 
 def _quick_snapshot_root(hermes_home: Optional[Path] = None) -> Path:

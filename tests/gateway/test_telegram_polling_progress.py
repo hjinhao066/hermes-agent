@@ -88,6 +88,7 @@ def _lifecycle_app():
     app.updater.stop = AsyncMock()
     app.bot = MagicMock()
     app.bot.delete_webhook = AsyncMock()
+    app.bot.get_me = AsyncMock(return_value=MagicMock(id=42, username="test_bot"))
     app.initialize = AsyncMock()
     app.start = AsyncMock()
     app.stop = AsyncMock()

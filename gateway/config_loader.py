@@ -160,6 +160,12 @@ def merge_platform_sections(yaml_cfg: dict, gateway_cfg: Any, gw_data: dict) -> 
             if "enabled" in plat_block:
                 merged_extra["_enabled_explicit"] = True
             merged = {**existing, **plat_block}
+            if plat_name == "telegram":
+                if not merged.get("token") and merged.get("bot_token"):
+                    merged["token"] = merged["bot_token"]
+                for identity_key in ("expected_bot_username", "expected_bot_id"):
+                    if identity_key in merged:
+                        merged_extra.setdefault(identity_key, merged[identity_key])
             if merged_extra:
                 merged["extra"] = merged_extra
             platforms_data[plat_name] = merged

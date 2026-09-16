@@ -201,6 +201,13 @@ def _handle_react(args, remove=False):
 
 def _handle_send(args):
     target, message = args.get("target", ""), args.get("message", "")
+    if not target:
+        from gateway.session_context import get_session_env
+        platform = get_session_env("HERMES_SESSION_PLATFORM", "")
+        chat = get_session_env("HERMES_SESSION_CHAT_ID", "")
+        thread = get_session_env("HERMES_SESSION_THREAD_ID", "")
+        if platform and chat:
+            target = f"{platform}:{chat}" + (f":{thread}" if thread else "")
     if not target or not message:
         return tool_error("Both 'target' and 'message' are required when action='send'")
     # Lone surrogates reach the outbound body via surrogateescape-decoded argv

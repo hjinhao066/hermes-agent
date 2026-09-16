@@ -1843,6 +1843,15 @@ class TurnRunner:
         ephemeral) + the gateway ephemeral prompt."""
         ctx = self._ctx
         combined = ctx.context_prompt or ""
+        if not ctx.channel_prompt and ctx.source is not None:
+            from gateway.platforms.base import resolve_channel_prompt
+            source = ctx.source
+            adapter = self._runner.adapters.get(source.platform)
+            extra = getattr(getattr(adapter, "config", None), "extra", {})
+            channel_id = str(source.thread_id or source.chat_id or "").strip()
+            parent_id = source.parent_chat_id or (source.chat_id if source.thread_id else None)
+            if isinstance(extra, dict) and channel_id:
+                ctx.channel_prompt = resolve_channel_prompt(extra, channel_id, str(parent_id) if parent_id else None)
         for extra in (
             (ctx.channel_prompt or "").strip(),
             self._runner._get_system_prompt_for_channel(

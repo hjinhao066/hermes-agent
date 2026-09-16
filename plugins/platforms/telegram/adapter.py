@@ -2760,6 +2760,86 @@ class TelegramAdapter(BasePlatformAdapter):
                 "[%s] Telegram menu: %d commands registered, %d hidden (over %d limit). Use /commands for full list.",
                 self.name, len(menu_commands), hidden_count, max_commands)
 
+    @staticmethod
+    def _bot_identity_attr(info: Any, key: str) -> Any:
+        if isinstance(info, dict):
+            return info.get(key)
+        return getattr(info, key, None)
+
+    @staticmethod
+    def _normalize_bot_username(value: Any) -> Optional[str]:
+        if value is None:
+            return None
+        text = str(value).strip()
+        if not text:
+            return None
+        return text.lstrip("@").lower()
+
+    def _expected_bot_username(self) -> Optional[str]:
+        raw = self.config.extra.get("expected_bot_username")
+        if raw is None:
+            raw = _get_scoped_secret("TELEGRAM_EXPECTED_BOT_USERNAME")
+        return self._normalize_bot_username(raw)
+
+    def _expected_bot_id(self) -> Optional[str]:
+        raw = self.config.extra.get("expected_bot_id")
+        if raw is None:
+            raw = _get_scoped_secret("TELEGRAM_EXPECTED_BOT_ID")
+        if raw is None:
+            return None
+        text = str(raw).strip()
+        return text or None
+
+    async def _verify_bot_identity(self) -> None:
+        """Verify the token belongs to the configured Telegram bot.
+
+        Telegram accepts any valid bot token, so "connected" only proves that a
+        token works. This guard catches the more dangerous case where Windows or
+        another launcher injects a stale token for a different bot.
+        """
+        # Prefer the bot owned by the current Application. During a reconnect
+        # ``self._bot`` can briefly refer to the previous Application, and a
+        # successful probe against that stale client says nothing about the
+        # active getUpdates transport.
+        bot = getattr(self._app, "bot", None) or self._bot
+        if bot is None:
+            return
+
+        get_me = getattr(bot, "get_me", None)
+        info = await get_me() if callable(get_me) else bot
+        bot_id = self._bot_identity_attr(info, "id")
+        username_raw = self._bot_identity_attr(info, "username")
+        username = self._normalize_bot_username(username_raw)
+        expected_id = self._expected_bot_id()
+        expected_username = self._expected_bot_username()
+
+        id_mismatch = expected_id is not None and str(bot_id or "").strip() != expected_id
+        username_mismatch = (
+            expected_username is not None
+            and (username or "") != expected_username
+        )
+        if id_mismatch or username_mismatch:
+            logger.error(
+                "[%s] Telegram bot identity mismatch: expected id=%s username=@%s, got id=%s username=@%s",
+                self.name,
+                expected_id or "*",
+                expected_username or "*",
+                bot_id or "?",
+                username or "?",
+            )
+            raise RuntimeError(
+                "Telegram bot identity mismatch: "
+                f"expected id={expected_id or '*'} username=@{expected_username or '*'}, "
+                f"got id={bot_id or '?'} username=@{username or '?'}"
+            )
+
+        logger.info(
+            "[%s] Telegram bot identity OK: id=%s username=@%s",
+            self.name,
+            bot_id or "?",
+            username or "?",
+        )
+
     async def _run_post_connect_housekeeping(self) -> None:
         """Command menu, status indicator and DM topics off the connect path; every step is non-fatal.
 
@@ -3238,7 +3318,11 @@ class TelegramAdapter(BasePlatformAdapter):
             self._wire_plugin_handlers(self._app)
             self._register_handlers(self._app)
             await self._initialize_app_with_retries(builder)
+            await asyncio.wait_for(self._verify_bot_identity(), 15)
             await self._app.start()
+            if not self._app.running:
+                raise RuntimeError("Telegram Application update processor did not start")
+            logger.info("[%s] Telegram update processor running (Application.running=True)", self.name)
             # Profile-scoped like TELEGRAM_WEBHOOK_SECRET: under multiplex os.environ holds the DEFAULT
             # profile's URL, and registering it on a secondary bot pushes that bot's updates to the
             # default's listener (and stops polling for it).
