@@ -14,7 +14,7 @@ import random
 import sys
 from contextlib import suppress
 from dataclasses import dataclass
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from agent.display import KawaiiSpinner
 from agent.interrupt_control import interrupt_issuer
@@ -409,16 +409,37 @@ class RetryRestartVerdict:
     final_response: Any
     retry_count: Any
     restart_count: Any
+    fallback_restart_watermark: int
     api_call_count: Any
     _preflight_compression_blocked: Any
     _turn_exit_reason: Any
+
+
+def _fallback_chain_hop(agent: Any, watermark: int) -> Optional[int]:
+    """Index of a fallback hop that moved forward inside the configured chain.
+
+    ``try_activate_fallback`` advances ``_fallback_index`` once per selected entry, and
+    the chain length is the bound. A rebuild that does not move the index forward is not
+    a hop: the caller charges it to ``restart_count`` so a re-armed flag cannot refund
+    the turn forever."""
+    chain = getattr(agent, "_fallback_chain", None) or ()
+    chain_len = len(chain)
+    if chain_len <= 0:
+        return None
+    try:
+        index = int(getattr(agent, "_fallback_index", 0) or 0)
+    except (TypeError, ValueError):
+        return None
+    if watermark < index <= chain_len:
+        return index
+    return None
 
 
 def apply_retry_restarts(
     agent: Any, *, _retry: Any, response: Any, interrupted: Any, messages: Any,
     conversation_history: Any, user_message: Any, api_kwargs: Any, current_turn_user_idx: Any,
     final_response: Any, retry_count: Any, max_retries: Any, api_call_count: Any,
-    restart_count: Any, length_continue_retries: Any,
+    restart_count: Any, fallback_restart_watermark: int = 0, length_continue_retries: Any,
     _preflight_compression_blocked: Any, _turn_exit_reason: Any,
 ) -> RetryRestartVerdict:
     """Consume the ``TurnRetryState`` restart flags after the retry loop, in the original
@@ -426,10 +447,13 @@ def apply_retry_restarts(
     assistant item; ``restart_with_rebuilt_messages`` is the single consumer that clears
     ``_preflight_compression_blocked`` so the fallback gets a fresh preflight (#84733).
 
-    The two refunding restart paths (redirect and rebuilt-for-fallback) are bounded by
-    ``max_retries`` via ``restart_count`` (a per-turn accumulator) so a runaway
+    Redirect restarts, and rebuilt restarts that do not advance the fallback chain, are
+    bounded by ``max_retries`` via ``restart_count`` (a per-turn accumulator) so a runaway
     interrupt/redirect that keeps re-arming a restart flag cannot refund the budget
-    forever and hold the turn lease indefinitely."""
+    forever and hold the turn lease indefinitely. A hop that advances ``_fallback_index``
+    inside the configured chain is not charged: ``api_max_retries`` is the per-call retry
+    budget, and charging every provider switch against it stops a longer chain before
+    the later entries are requested."""
 
     from agent.conversation_loop import (
         _HANDOFF_SKIP_FINAL_RESPONSE, _should_skip_model_call_for_reference_handoff
@@ -439,6 +463,7 @@ def apply_retry_restarts(
         return RetryRestartVerdict(
             action=action, current_turn_user_idx=current_turn_user_idx,
             final_response=final_response, retry_count=retry_count, restart_count=restart_count,
+            fallback_restart_watermark=fallback_restart_watermark,
             api_call_count=api_call_count,
             _preflight_compression_blocked=_preflight_compression_blocked,
             _turn_exit_reason=_turn_exit_reason,
@@ -506,18 +531,34 @@ def apply_retry_restarts(
         return _verdict("continue")
 
     if _retry.restart_with_rebuilt_messages:
-        restart_count += 1
-        if restart_count > max_retries:
-            # A stall/failure keeps re-escalating to the fallback chain: stop refunding the
-            # iteration budget and re-issuing, or a runaway turn holds the turn lease
-            # indefinitely (rebuilt restarts previously had no bound).
-            _turn_exit_reason = "rebuilt_restart_limit_exceeded"
-            logger.warning(
-                "Rebuilt-message restart limit (%s) exceeded; ending turn instead of "
-                "refunding the iteration budget indefinitely.",
-                max_retries,
-            )
-            return _verdict("break")
+        hop = _fallback_chain_hop(agent, fallback_restart_watermark)
+        if hop is None:
+            # No forward chain movement: a re-armed rebuild, or an index past the
+            # chain. Charge it. A backwards index (primary recovery rewalk) is
+            # charged once, then anchored so the rest of that walk is forward.
+            restart_count += 1
+            if restart_count > max_retries:
+                _turn_exit_reason = "rebuilt_restart_limit_exceeded"
+                logger.warning(
+                    "Rebuilt-message restart limit (%s) exceeded; ending turn instead of "
+                    "refunding the iteration budget indefinitely.",
+                    max_retries,
+                )
+                return _verdict("break")
+            try:
+                index = int(getattr(agent, "_fallback_index", 0) or 0)
+            except (TypeError, ValueError):
+                index = 0
+            chain_len = len(getattr(agent, "_fallback_chain", None) or ())
+            if 0 < index < fallback_restart_watermark and index <= chain_len:
+                fallback_restart_watermark = index
+        else:
+            if restart_count >= max_retries:
+                logger.info(
+                    "Fallback chain hop %s continues past the rebuilt-restart cap (%s).",
+                    hop, max_retries,
+                )
+            fallback_restart_watermark = hop
         # A stall/failure escalated to the fallback chain: re-issue against the
         # active fallback provider, refunding budget/count for the stalled attempt.
         api_call_count -= 1

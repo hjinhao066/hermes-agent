@@ -90,3 +90,55 @@ def test_interrupt_exit_reason_names_the_system_issuer(tool_interrupt_reason, ex
     """A watchdog abort must not be recorded as a user stop: the exit reason carries the issuer."""
     verdict = _interrupted_agent(tool_interrupt_reason)
     assert (verdict.action, verdict.interrupted, verdict._turn_exit_reason) == ("break", True, expected)
+
+def test_forward_fallback_hops_are_not_charged_against_the_retry_cap():
+    """A configured chain longer than ``api_max_retries`` must still be requested.
+
+    Charging every provider switch against the per-call retry cap stopped the noon
+    mail job on hop 4 of a 9-entry chain, before the next model was called.
+    """
+    agent = _agent()
+    agent._fallback_chain = [{"model": f"m{i}"} for i in range(6)]
+    watermark, restart_count = 0, 0
+    actions = []
+    for index in range(1, 7):
+        agent._fallback_index = index
+        _retry = TurnRetryState()
+        _retry.restart_with_rebuilt_messages = True
+        verdict = apply_retry_restarts(
+            agent, _retry=_retry, response=None, interrupted=False, messages=[],
+            conversation_history=[], user_message="hi", api_kwargs={}, current_turn_user_idx=0,
+            final_response=None, retry_count=0, max_retries=MAX_RETRIES, api_call_count=1,
+            restart_count=restart_count, fallback_restart_watermark=watermark,
+            length_continue_retries=0, _preflight_compression_blocked=True,
+            _turn_exit_reason="unknown",
+        )
+        actions.append(verdict.action)
+        watermark = verdict.fallback_restart_watermark
+        restart_count = verdict.restart_count
+    assert actions == ["continue"] * 6
+    assert (restart_count, watermark, agent.iteration_budget.refunds) == (0, 6, 6)
+
+
+def test_a_stalled_fallback_index_still_hits_the_restart_cap():
+    """Re-arming the rebuild flag without moving the chain index stays bounded."""
+    agent = _agent()
+    agent._fallback_chain = [{"model": "m0"}, {"model": "m1"}]
+    agent._fallback_index = 2
+    restart_count, watermark, verdicts = 0, 2, []
+    while len(verdicts) < MAX_RETRIES + 2 and (not verdicts or verdicts[-1].action != "break"):
+        _retry = TurnRetryState()
+        _retry.restart_with_rebuilt_messages = True
+        verdicts.append(apply_retry_restarts(
+            agent, _retry=_retry, response=None, interrupted=False, messages=[],
+            conversation_history=[], user_message="hi", api_kwargs={}, current_turn_user_idx=0,
+            final_response=None, retry_count=0, max_retries=MAX_RETRIES, api_call_count=1,
+            restart_count=restart_count, fallback_restart_watermark=watermark,
+            length_continue_retries=0, _preflight_compression_blocked=True,
+            _turn_exit_reason="unknown",
+        ))
+        restart_count = verdicts[-1].restart_count
+        watermark = verdicts[-1].fallback_restart_watermark
+    assert [v.action for v in verdicts] == ["continue"] * MAX_RETRIES + ["break"]
+    assert verdicts[-1]._turn_exit_reason == "rebuilt_restart_limit_exceeded"
+    assert watermark == 2

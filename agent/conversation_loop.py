@@ -1337,6 +1337,10 @@ class _LoopState:
     # turn so a runaway interrupt/redirect that keeps re-arming a restart flag cannot
     # refund the iteration budget forever and hold the turn lease indefinitely.
     restart_count: int = 0
+    # Highest ``_fallback_index`` already accepted as a chain hop this turn. Forward hops
+    # inside the configured chain are not charged to ``restart_count``; a stall or a
+    # backwards rewalk is. See ``apply_retry_restarts``.
+    fallback_restart_watermark: int = 0
     _outer_error_count: int = 0  # outer-loop exceptions this turn (#92450), see _MAX_OUTER_LOOP_ERRORS
     truncated_tool_call_retries: int = 0
     truncated_response_parts: List[str] = field(default_factory=list)
