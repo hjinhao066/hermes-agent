@@ -1466,6 +1466,18 @@ DEFAULT_CONFIG = {
         # through the unchanged-file dedup and, if still over, drops the oldest entries (0 = keep
         # the ledger append-only forever, the previous behaviour).
         "ledger_max_bytes": 5 * 1024 * 1024,
+        # Skill-index rendering in the system prompt. "full" (default) = every category renders its
+        # own description, byte-for-byte the shipped behaviour. "compact" = opt-in slimming: every
+        # category NOT listed in prompt_full_categories collapses to a single "[names only]" line.
+        # Demotion drops index descriptions only — every skill name stays in the index and file
+        # discovery (skills_list / skill_view) is untouched. Any other value, or an absent key,
+        # means "full", so a typo can never slim a prompt.
+        "prompt_index_mode": "full",
+        # Categories that keep their descriptions under prompt_index_mode: compact. Entries are
+        # top-level category names ("devops") or nested paths ("mlops/training"); a top-level entry
+        # keeps its whole subtree. Empty list = every category is names-only. Ignored in "full"
+        # mode. Names are never hidden, so a stale entry costs bytes, never capability.
+        "prompt_full_categories": [],
     },
 
     # Curator — background maintenance of AGENT-CREATED skills (never hub-installed): marks

@@ -7,7 +7,7 @@ import os
 import re
 import sys
 from pathlib import Path, PurePath
-from typing import Any, Callable, Dict, List, Optional, Set, Tuple
+from typing import Any, Callable, Dict, FrozenSet, List, Optional, Set, Tuple
 
 from hermes_constants import (
     get_config_path,
@@ -334,6 +334,31 @@ def parse_config_string_list(value) -> List[str]:
 
 def _normalize_string_set(values) -> Set[str]:
     return {name.strip() for name in parse_config_string_list(values) if name.strip()}
+
+
+# ── Skill-index rendering mode ───────────────────────────────────────────────
+#: Default: every category in the system-prompt skill index renders its own description.
+SKILLS_INDEX_MODE_FULL = "full"
+#: Opt-in ``skills.prompt_index_mode: compact`` — every category NOT in
+#: ``skills.prompt_full_categories`` is demoted to a names-only line.
+SKILLS_INDEX_MODE_COMPACT = "compact"
+
+
+def skills_index_full_categories() -> Optional[FrozenSet[str]]:
+    """Categories that keep their descriptions under ``skills.prompt_index_mode: compact``.
+
+    Returns ``None`` for the default mode (``full``, and any unset/unknown value — a typo can
+    never slim a prompt), meaning "render every category with its description". In ``compact``
+    mode the demoted side is implicit: everything not named here. An empty allowlist therefore
+    means a names-only index. Entries match a top-level category (``devops``) or a nested path
+    (``mlops/training``); a top-level entry keeps that whole subtree.
+
+    Demotion drops index descriptions only — skill names stay visible and file discovery
+    (``skills_list`` / ``skill_view``) is untouched.
+    """
+    if (str(_skills_cfg_get("prompt_index_mode") or "").strip().lower()) != SKILLS_INDEX_MODE_COMPACT:
+        return None
+    return frozenset(_normalize_string_set(_skills_cfg_get("prompt_full_categories")))
 
 
 # config identity -> resolved external dirs. Called once per skill during

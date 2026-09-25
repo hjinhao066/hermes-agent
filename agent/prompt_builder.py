@@ -1259,17 +1259,33 @@ def _current_session_platform_hint() -> str:
         return ""
 
 
+_UNSET: Any = object()  # distinguishes "caller said nothing" from an explicit None
+
+
 def build_skills_system_prompt(
     available_tools: "set[str] | None" = None, available_toolsets: "set[str] | None" = None,
     compact_categories: "frozenset[str] | None" = None, skills_dir_override: "Path | None" = None,
+    full_categories: "frozenset[str] | None | Any" = _UNSET,
 ) -> str:
     """Compact skill index for the system prompt.
 
     External dirs (``skills.external_dirs``) are read-only and lose name collisions to local skills.
     ``compact_categories`` (coding posture) demotes categories to a names-only line — nothing is ever hidden.
+    ``full_categories`` is the opposite, allowlist-side knob of the same demotion: when not ``None``,
+    every category whose top-level name is missing from it is demoted. Passing nothing resolves it from
+    ``skills.prompt_index_mode: compact`` + ``skills.prompt_full_categories``; the default (``full``, or
+    any unset/unknown mode) leaves it ``None`` so every description renders as before. Either way names
+    stay visible — only descriptions leave the index.
     ``skills_dir_override`` makes home resolution EXPLICIT: a build thread that never bound the HERMES_HOME
     ContextVar would otherwise leak the default profile's skills into a bot's prompt.
     """
+    if full_categories is _UNSET:
+        try:
+            from agent.skill_utils import skills_index_full_categories
+            full_categories = skills_index_full_categories()
+        except Exception as e:  # pragma: no cover - config trouble must never break prompt build
+            logger.debug("Could not resolve the skills index mode from config: %s", e)
+            full_categories = None
     _home_token = None
     if skills_dir_override is not None:
         skills_dir = Path(skills_dir_override)
@@ -1284,7 +1300,8 @@ def build_skills_system_prompt(
         if not skills_dir.exists() and not external_dirs and not project_dirs:
             return ""
         return _build_skills_system_prompt_inner(
-            skills_dir, external_dirs, available_tools, available_toolsets, compact_categories, project_dirs)
+            skills_dir, external_dirs, available_tools, available_toolsets, compact_categories, project_dirs,
+            full_categories)
     finally:
         if _home_token is not None:
             reset_hermes_home_override(_home_token)
@@ -1343,20 +1360,41 @@ def _label_visible_entries(visible_entries: list[dict], skills_by_category: dict
         skills_by_category.setdefault(category, []).append((fm, desc))
 
 
+def _demoted_skill_categories(
+    skills_by_category: dict[str, list[tuple[str, str]]],
+    compact_categories: "frozenset[str] | None", full_categories: "frozenset[str] | None",
+) -> frozenset[str]:
+    """Categories whose descriptions are omitted from the index.
+
+    Two independent, composable sources, both DEMOTING only — a name is never hidden:
+    the posture deny-list ``compact_categories`` and, in compact index mode, everything absent
+    from the ``full_categories`` allowlist. Nested categories follow their top-level parent,
+    unless the allowlist (or deny-list) names the nested path itself.
+    """
+    deny = {c for c in (compact_categories or ()) if c}
+    allow = None if full_categories is None else {c for c in full_categories if c}
+    demoted = set()
+    for category in skills_by_category:
+        top = category.split("/", 1)[0]
+        if top in deny or (allow is not None and category not in allow and top not in allow):
+            demoted.add(category)
+    return frozenset(demoted)
+
+
 def _render_skills_index(
     skills_by_category: dict[str, list[tuple[str, str]]], category_descriptions: dict[str, str],
     compact_categories: "frozenset[str] | None", available_tools: "set[str] | None",
+    full_categories: "frozenset[str] | None" = None,
 ) -> str:
     """Render the ## Skills block; "" when there is nothing to list."""
     if not skills_by_category:
         return ""
     # Demoted categories collapse to one names-only line. NEVER drop entries — agent-created skills are the
     # model's project memory and it won't rediscover them via skills_list. Nested categories follow their parent.
-    demoted = frozenset(cat for cat in skills_by_category if cat.split("/", 1)[0] in (compact_categories or frozenset()))
+    demoted = _demoted_skill_categories(skills_by_category, compact_categories, full_categories)
     hidden_note = (
-        "\n(Categories marked [names only] are outside the current coding "
-        "context, so their descriptions are omitted — the skills work "
-        "normally and load with skill_view(name) as usual.)"
+        "\n(Categories marked [names only] have their descriptions omitted from this session's "
+        "skill index — the skills work normally and load with skill_view(name) as usual.)"
     ) if demoted else ""
     # Don't name web_search when the session has no web tools (dangling reference).
     _basic_tools = "terminal" if available_tools is not None and "web_search" not in available_tools else "web_search or terminal"
@@ -1411,7 +1449,7 @@ def _oneshot_prompt_variant() -> bool:
 def _build_skills_system_prompt_inner(
     skills_dir: "Path", external_dirs: "list[Path]", available_tools: "set[str] | None",
     available_toolsets: "set[str] | None", compact_categories: "frozenset[str] | None",
-    project_dirs: "list[Path] | None" = None,
+    project_dirs: "list[Path] | None" = None, full_categories: "frozenset[str] | None" = None,
 ) -> str:
     # The resolved platform is part of the key: per-platform disabled-skill lists need distinct cache entries.
     _platform_hint = _current_session_platform_hint()
@@ -1423,6 +1461,7 @@ def _build_skills_system_prompt_inner(
         tuple(sorted(str(ts) for ts in (available_toolsets or set()))),
         _platform_hint, tuple(sorted(disabled)), tuple(sorted(compact_categories or ())),
         _oneshot_prompt_variant(),
+        None if full_categories is None else tuple(sorted(full_categories)),
     )
     snapshot = _load_skills_snapshot(skills_dir)
     app_gated = snapshot is not None and any(
@@ -1485,7 +1524,8 @@ def _build_skills_system_prompt_inner(
         for cat, cat_desc in _read_category_descriptions(ext_dir, "Could not read external skill description %s: %s").items():
             category_descriptions.setdefault(cat, cat_desc)
 
-    result = _render_skills_index(skills_by_category, category_descriptions, compact_categories, available_tools)
+    result = _render_skills_index(skills_by_category, category_descriptions, compact_categories, available_tools,
+                                  full_categories)
     with _SKILLS_PROMPT_CACHE_LOCK:
         _SKILLS_PROMPT_CACHE[cache_key] = result
         _SKILLS_PROMPT_CACHE.move_to_end(cache_key)

@@ -1135,6 +1135,26 @@ skills:
   #   - ~/.agents/skills
   #   - /home/shared/team-skills
 
+  # Skill-index rendering in the system prompt (always-on context, so it costs
+  # tokens every turn).  "full" is the default: every category renders its own
+  # description.  "compact" is opt-in slimming — every category NOT named in
+  # prompt_full_categories collapses to one "[names only]" line, which removes
+  # descriptions from the index only.  Every skill name stays visible and loads
+  # normally with skill_view(name); skills_list/skill_view are unaffected.
+  # prompt_index_mode: full
+  # prompt_full_categories:
+  #   - autonomous-ai-agents
+  #   - devops
+  #   - software-development
+  #   - research
+  #   - productivity
+  #   - github
+  #   - social-media
+  #   - writing
+  #   - trading-systems
+  #   - hermes-desktop-plugins
+  #   - mlops/training          # nested paths are allowed too
+
 # =============================================================================
 # Agent Behavior
 # =============================================================================
