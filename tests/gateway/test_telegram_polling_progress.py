@@ -117,6 +117,12 @@ def _configure_lifecycle_connect(monkeypatch, adapter, apps):
     monkeypatch.setattr(adapter, "_release_platform_lock", MagicMock())
     monkeypatch.setattr(adapter, "_fallback_ips", lambda: [])
     monkeypatch.setattr(adapter, "_start_post_connect_housekeeping", MagicMock())
+    # The fallback kill switch is ambient: a deployment that exports
+    # HERMES_TELEGRAM_DISABLE_FALLBACK_IPS=true (it is read straight from os.environ by
+    # _build_ptb_requests) would otherwise flip every "transport is wired" case in this module to
+    # the disabled branch. Clear it so the connect matrix describes the default behavior; the
+    # disabled-path tests set it explicitly *after* this call.
+    monkeypatch.delenv("HERMES_TELEGRAM_DISABLE_FALLBACK_IPS", raising=False)
     return builders
 
 
@@ -309,6 +315,41 @@ async def test_non_finite_fallback_discovery_timeout_uses_finite_default(monkeyp
     transport = httpx_kwargs.get("transport")
     assert isinstance(transport, tg_adapter.TelegramFallbackTransport)
     assert transport._fallback_ips == list(tg_adapter.SEED_FALLBACK_IPS)
+    await adapter.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_falsey_disable_flag_keeps_fallback_transport_active(monkeypatch):
+    """Only a truthy kill switch disables the transport; ``false``/``0`` must keep it wired in.
+
+    Pins the contract that made the discovery-timeout cases above ambiguous: the env value is
+    parsed as a boolean opt-in, so an explicit non-truthy value must still build the fallback
+    transport (and must not be confused with the deployment-wide ``true`` setting).
+    """
+    adapter = _make_adapter()
+    polling_app = _lifecycle_app()
+
+    async def start_polling_with_progress(**_kwargs):
+        adapter._record_polling_progress(adapter._polling_generation)
+
+    polling_app.updater.start_polling = AsyncMock(
+        side_effect=start_polling_with_progress
+    )
+    builders = _configure_lifecycle_connect(monkeypatch, adapter, [polling_app])
+    monkeypatch.setenv("HERMES_TELEGRAM_DISABLE_FALLBACK_IPS", "false")
+
+    discovered = ["149.154.167.220", "149.154.167.221"]
+
+    async def discover():
+        return list(discovered)
+
+    monkeypatch.setattr(tg_adapter, "discover_fallback_ips", discover)
+
+    assert await adapter.connect() is True
+    httpx_kwargs = builders[0].polling_request.kwargs.get("httpx_kwargs") or {}
+    transport = httpx_kwargs.get("transport")
+    assert isinstance(transport, tg_adapter.TelegramFallbackTransport)
+    assert transport._fallback_ips == discovered
     await adapter.disconnect()
 
 
