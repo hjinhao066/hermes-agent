@@ -1,6 +1,13 @@
 import { describe, expect, it } from 'vitest'
 
-import { blobDedupeKey, detectTrigger, extractClipboardImageBlobs } from './text-utils'
+import {
+  blobDedupeKey,
+  detectTrigger,
+  extractClipboardImageBlobs,
+  shouldDropPathEchoText,
+  shouldReadNativeClipboardImage,
+  textLooksLikeClipboardImagePaths
+} from './text-utils'
 
 describe('detectTrigger', () => {
   it('detects a bare slash trigger with an empty query', () => {
@@ -252,6 +259,50 @@ describe('extractClipboardImageBlobs', () => {
     } as unknown as DataTransfer
 
     expect(extractClipboardImageBlobs(clipboard)).toEqual([])
+  })
+
+  it('accepts an image file whose MIME Windows left blank', () => {
+    const image = new File([new Uint8Array([1, 2, 3, 4])], 'PixPin_2026-09-23.png', { type: '' })
+    const clipboard = {
+      files: { length: 1, item: (index: number) => (index === 0 ? image : null) },
+      getData: () => '',
+      items: [{ kind: 'file', type: '', getAsFile: () => image }]
+    } as unknown as DataTransfer
+
+    expect(extractClipboardImageBlobs(clipboard)).toEqual([image])
+  })
+
+  it('does not treat a non-image file with a blank MIME as an image', () => {
+    const notes = new File([new Uint8Array([1, 2, 3, 4])], 'notes.txt', { type: '' })
+    const clipboard = {
+      files: { length: 1, item: (index: number) => (index === 0 ? notes : null) },
+      getData: () => '',
+      items: [{ kind: 'file', type: '', getAsFile: () => notes }]
+    } as unknown as DataTransfer
+
+    expect(extractClipboardImageBlobs(clipboard)).toEqual([])
+  })
+})
+
+describe('native clipboard image fallback', () => {
+  it('treats an empty paste and a copied image path as a native image read', () => {
+    expect(shouldReadNativeClipboardImage(0, '')).toBe(true)
+    expect(shouldReadNativeClipboardImage(0, 'PixPin_2026-09-23_01-19-39.png')).toBe(true)
+    expect(shouldReadNativeClipboardImage(0, String.raw`C:\Users\hjinh\Pictures\My Shot.png`)).toBe(true)
+    expect(textLooksLikeClipboardImagePaths('file:///C:/Users/hjinh/Pictures/shot.png')).toBe(true)
+  })
+
+  it('leaves prose alone, including a sentence that mentions a png', () => {
+    expect(shouldReadNativeClipboardImage(0, 'hello from the thread')).toBe(false)
+    expect(shouldReadNativeClipboardImage(0, 'see shot.png please')).toBe(false)
+    expect(shouldReadNativeClipboardImage(0, 'https://example.com/shot.png')).toBe(false)
+    expect(shouldReadNativeClipboardImage(1, '')).toBe(false)
+  })
+
+  it('drops the path echo once the image file itself is attached', () => {
+    expect(shouldDropPathEchoText(1, 'PixPin_2026-09-23.png')).toBe(true)
+    expect(shouldDropPathEchoText(1, 'look at PixPin_2026-09-23.png')).toBe(false)
+    expect(shouldDropPathEchoText(0, 'PixPin_2026-09-23.png')).toBe(false)
   })
 })
 

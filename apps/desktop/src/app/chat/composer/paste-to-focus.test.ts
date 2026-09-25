@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
-import { onComposerAttachImagesRequest, onComposerFocusRequest, onComposerInsertRequest } from './focus'
+import { onComposerAttachImagesRequest, onComposerFocusRequest, onComposerInsertRequest, onComposerPasteNativeImageRequest } from './focus'
 import { handleWindowPaste, routeClipboardToComposer } from './paste-to-focus'
 
 /** Minimal DataTransfer stand-in: text/plain + optional image file items. */
@@ -120,7 +120,7 @@ describe('handleWindowPaste', () => {
     expect(event.defaultPrevented).toBe(false)
   })
 
-  it('leaves an already-handled or empty paste alone', () => {
+  it('leaves an already-handled paste alone and reads the native clipboard for an empty one', () => {
     const handled = pasteEvent(clipboard({ text: 'hi' }))
     handled.preventDefault()
     const before = handled.defaultPrevented
@@ -128,8 +128,29 @@ describe('handleWindowPaste', () => {
     handleWindowPaste(handled)
     expect(before).toBe(true)
 
+    const native: string[] = []
+    const off = onComposerPasteNativeImageRequest(({ fallbackText }) => native.push(fallbackText ?? ''))
     const empty = pasteEvent(clipboard())
     handleWindowPaste(empty)
-    expect(empty.defaultPrevented).toBe(false)
+    expect(empty.defaultPrevented).toBe(true)
+
+    return flushBus().then(() => {
+      off()
+      expect(native).toEqual([''])
+    })
+  })
+
+  it('sends a pasted image path to the native clipboard instead of inserting it', async () => {
+    const inserted: string[] = []
+    const native: string[] = []
+    const offInsert = onComposerInsertRequest(({ text }) => inserted.push(text))
+    const offNative = onComposerPasteNativeImageRequest(({ fallbackText }) => native.push(fallbackText ?? ''))
+
+    expect(routeClipboardToComposer(clipboard({ text: String.raw`C:\Users\hjinh\Pictures\shot.png` }))).toBe(true)
+    await flushBus()
+    offInsert()
+    offNative()
+    expect(inserted).toEqual([])
+    expect(native).toEqual([String.raw`C:\Users\hjinh\Pictures\shot.png`])
   })
 })

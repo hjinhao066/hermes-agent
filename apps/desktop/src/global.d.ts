@@ -352,7 +352,7 @@ declare global {
         webContentsId: number
       }) => Promise<string>
       savePastedText: (text: string) => Promise<string>
-      saveClipboardImage: () => Promise<string>
+      saveClipboardImage: () => Promise<string | string[]>
       getPathForFile: (file: File) => string
       normalizePreviewTarget: (target: string, baseDir?: string) => Promise<HermesPreviewTarget | null>
       watchPreviewFile: (url: string) => Promise<HermesPreviewWatch>

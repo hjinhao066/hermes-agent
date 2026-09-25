@@ -566,9 +566,12 @@ export function useComposerActions({
   const pasteClipboardImage = useCallback(
     async ({ silent = false }: { silent?: boolean } = {}) => {
       try {
-        const path = await window.hermesDesktop?.saveClipboardImage()
+        const saved = await window.hermesDesktop?.saveClipboardImage()
+        const paths = (Array.isArray(saved) ? saved : saved ? [saved] : []).filter(
+          (entry): entry is string => typeof entry === 'string' && entry.length > 0
+        )
 
-        if (!path) {
+        if (!paths.length) {
           if (!silent) {
             notify({
               kind: 'warning',
@@ -580,7 +583,9 @@ export function useComposerActions({
           return false
         }
 
-        await attachImagePath(path)
+        for (const imagePath of paths) {
+          await attachImagePath(imagePath)
+        }
 
         return true
       } catch (err) {

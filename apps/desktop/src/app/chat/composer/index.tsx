@@ -57,7 +57,13 @@ import { COMPOSER_AREAS, runComposerMiddleware } from './contrib'
 import { ComposerControls } from './controls'
 import { ComposerDirectiveActions } from './directive-actions'
 import { COMPOSER_DROP_ACTIVE_CLASS, COMPOSER_DROP_FADE_CLASS } from './drop-affordance'
-import { markActiveComposer, onComposerAttachImagesRequest } from './focus'
+import {
+  markActiveComposer,
+  onComposerAttachImagesRequest,
+  onComposerPasteNativeImageRequest,
+  requestComposerFocus,
+  requestComposerInsert
+} from './focus'
 import { HelpHint } from './help-hint'
 import { useAtCompletions } from './hooks/use-at-completions'
 import { useComposerBranch } from './hooks/use-composer-branch'
@@ -98,7 +104,7 @@ import { ComposerStatusStack } from './status-stack'
 import { CodingStatusRow } from './status-stack/coding-row'
 import { StatusDrawerContent, StatusDrawerToggle } from './status-stack/drawer'
 import { SuggestionPills } from './suggestion-pills'
-import { extractClipboardImageBlobs, openDirectiveScope } from './text-utils'
+import { extractClipboardImageBlobs, openDirectiveScope, shouldDropPathEchoText, shouldReadNativeClipboardImage } from './text-utils'
 import { ComposerTriggerPopover } from './trigger-popover'
 import type { ChatBarProps } from './types'
 import { isRedoShortcut, isUndoShortcut } from './undo-history'
@@ -344,6 +350,35 @@ export function ChatBar({
     })
   }, [onAttachImageBlob, scope.target])
 
+  // Unfocused Ctrl+V (and a focused paste that only saw a path) asks the
+  // active composer to read the native clipboard. Pixels attach; a path that
+  // wasn't actually an image is inserted as text instead of being dropped.
+  useEffect(() => {
+    if (!onPasteClipboardImage) {
+      return undefined
+    }
+
+    return onComposerPasteNativeImageRequest(({ fallbackText, target }) => {
+      if (target !== scope.target) {
+        return
+      }
+
+      const text = fallbackText?.trim() ?? ''
+
+      void Promise.resolve(onPasteClipboardImage({ silent: true })).then(attached => {
+        if (attached) {
+          requestComposerFocus(scope.target)
+
+          return
+        }
+
+        if (text) {
+          requestComposerInsert(pathifyRefs(linkifyUrls(text)), { mode: 'inline', target: scope.target })
+        }
+      })
+    })
+  }, [onPasteClipboardImage, scope.target])
+
   // Prior history belongs to the draft that just left — undoing into another
   // conversation's text is worse than having none.
   useEffect(() => {
@@ -574,7 +609,13 @@ export function ChatBar({
   }
 
   const handlePaste = (event: ClipboardEvent<HTMLDivElement>) => {
-    const imageBlobs = extractClipboardImageBlobs(event.clipboardData)
+    const clipboard = event.clipboardData
+
+    if (!clipboard) {
+      return
+    }
+
+    const imageBlobs = extractClipboardImageBlobs(clipboard)
 
     if (imageBlobs.length > 0 && onAttachImageBlob) {
       triggerHaptic('selection')
@@ -588,24 +629,47 @@ export function ChatBar({
     // blank lines (common when selecting from terminals, code blocks, web pages)
     // doesn't dump multiline padding into the composer. Internal newlines are
     // preserved — only the edges are cleaned up.
-    const pastedText = sanitizeComposerInput(event.clipboardData.getData('text').trim())
+    const pastedText = sanitizeComposerInput(clipboard.getData('text').trim())
 
-    if (!pastedText) {
+    // Image attached, and the only "text" is the path Windows echoes beside a
+    // copied file. Keep the attachment, drop the path.
+    if (imageBlobs.length > 0 && (!pastedText || shouldDropPathEchoText(imageBlobs.length, pastedText))) {
       event.preventDefault()
 
-      if (imageBlobs.length > 0) {
+      return
+    }
+
+    // DOM paste had no image bytes. Windows screenshot tools put the pixels in
+    // a PNG clipboard format Chromium doesn't surface, and Explorer's copy of
+    // a picture shows up as a path. The main process reads both. A path that
+    // isn't actually an image is put back into the composer.
+    if (shouldReadNativeClipboardImage(imageBlobs.length, pastedText)) {
+      event.preventDefault()
+
+      const editor = event.currentTarget
+
+      const restoreText = () => {
+        if (!pastedText) {
+          return
+        }
+
+        recordUndoPoint()
+        insertComposerContentsAtCaret(editor, pathifyRefs(linkifyUrls(pastedText)), openDirectiveScope(editor))
+        scheduleFlushEditorToDraft(editor)
+      }
+
+      if (!onPasteClipboardImage) {
+        restoreText()
+
         return
       }
 
-      // Under WSL2/WSLg the Windows host clipboard doesn't bridge *images* to
-      // the Linux clipboard the DOM paste event reads, so a host screenshot
-      // arrives as an empty paste (no blobs, no text). Fall back to the main
-      // process, which pulls the image straight off the Windows clipboard.
-      // Silent so a genuinely-empty paste doesn't pop a "no image" warning.
-      if (onPasteClipboardImage) {
-        triggerHaptic('selection')
-        void onPasteClipboardImage({ silent: true })
-      }
+      triggerHaptic('selection')
+      void Promise.resolve(onPasteClipboardImage({ silent: true })).then(attached => {
+        if (!attached) {
+          restoreText()
+        }
+      })
 
       return
     }

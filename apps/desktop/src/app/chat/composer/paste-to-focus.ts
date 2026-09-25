@@ -16,9 +16,14 @@ import { DATA_IMAGE_URL_RE } from '@/lib/embedded-images'
 import { isEditableTarget } from '@/lib/keybinds/combo'
 import { composerFocusBlockedBySurface } from '@/lib/keybinds/composer-focus-keys'
 
-import { requestComposerAttachImages, requestComposerFocus, requestComposerInsert } from './focus'
+import {
+  requestComposerAttachImages,
+  requestComposerFocus,
+  requestComposerInsert,
+  requestComposerPasteNativeImage
+} from './focus'
 import { pathifyRefs } from './path-refs'
-import { extractClipboardImageBlobs } from './text-utils'
+import { extractClipboardImageBlobs, shouldDropPathEchoText, shouldReadNativeClipboardImage } from './text-utils'
 import { linkifyUrls } from './url-refs'
 
 /** Route clipboard contents to the active composer. True when it carried
@@ -33,6 +38,20 @@ export function routeClipboardToComposer(clipboard: DataTransfer): boolean {
 
   // A bare `data:` URL IS the image attached above — not text to insert.
   if (text && !DATA_IMAGE_URL_RE.test(text)) {
+    // A copied image file arrives as its path in text/plain and the pixels
+    // only on the native clipboard. Don't insert that path as the message.
+    if (shouldReadNativeClipboardImage(blobs.length, text)) {
+      requestComposerPasteNativeImage(text)
+
+      return true
+    }
+
+    if (shouldDropPathEchoText(blobs.length, text)) {
+      requestComposerFocus('active')
+
+      return true
+    }
+
     // Same chipping the focused paste path applies: links land as `@url:`
     // chips, bare `@path` tokens promote. The insert focuses the composer.
     requestComposerInsert(pathifyRefs(linkifyUrls(text)), { mode: 'inline' })
@@ -65,5 +84,13 @@ export function handleWindowPaste(event: ClipboardEvent) {
 
   if (routeClipboardToComposer(event.clipboardData)) {
     event.preventDefault()
+
+    return
   }
+
+  // Nothing the DOM clipboard could express. A Windows screenshot is often
+  // exactly that: pixels in a PNG format, no text, no File. The composer
+  // reads it from the main process.
+  requestComposerPasteNativeImage()
+  event.preventDefault()
 }

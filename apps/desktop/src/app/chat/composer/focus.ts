@@ -54,10 +54,17 @@ interface AttachImagesDetail {
   target: ComposerTarget
 }
 
+interface PasteNativeImageDetail {
+  /** Plain text to insert when the native clipboard has no image. */
+  fallbackText?: string
+  target: ComposerTarget
+}
+
 const FOCUS_EVENT = 'hermes:composer-focus'
 const INSERT_EVENT = 'hermes:composer-insert'
 const INSERT_REPLY_EVENT = 'hermes:composer-insert-reply'
 const ATTACH_IMAGES_EVENT = 'hermes:composer-attach-images'
+const PASTE_NATIVE_IMAGE_EVENT = 'hermes:composer-paste-native-image'
 const INSERT_REFS_EVENT = 'hermes:composer-insert-refs'
 const SUBMIT_EVENT = 'hermes:composer-submit'
 const VOICE_TOGGLE_EVENT = 'hermes:composer-voice-toggle'
@@ -381,6 +388,18 @@ export const requestComposerAttachImages = (
 
 export const onComposerAttachImagesRequest = (handler: (detail: AttachImagesDetail) => void) =>
   subscribe<AttachImagesDetail>(ATTACH_IMAGES_EVENT, handler)
+
+/** Ctrl+V whose DOM clipboard had no image bytes. The active composer reads
+ *  the native clipboard (Windows PNG format / copied image file) and, when
+ *  that is empty too, inserts `fallbackText`. */
+export const requestComposerPasteNativeImage = (fallbackText = '') =>
+  dispatch<PasteNativeImageDetail>(PASTE_NATIVE_IMAGE_EVENT, {
+    fallbackText,
+    target: resolve('active')
+  })
+
+export const onComposerPasteNativeImageRequest = (handler: (detail: PasteNativeImageDetail) => void) =>
+  subscribe<PasteNativeImageDetail>(PASTE_NATIVE_IMAGE_EVENT, handler)
 
 /** Insert typed ref chips (carrying a display label) into a composer — the
  * structured cousin of {@link requestComposerInsert}, used for session links. */

@@ -545,6 +545,7 @@ import {
 import { installWindowsSystemCaTrust } from './windows-system-ca'
 import { readWindowsUserEnvVar } from './windows-user-env'
 import { isPackagedInstallPath as isPackagedInstallPathUnderRoots } from './workspace-cwd'
+import { readDesktopClipboardImage } from './windows-clipboard-image'
 import { readWslWindowsClipboardImage } from './wsl-clipboard-image'
 import { resolvePickerDefaultPath, setActiveGatewayProfile, setWslBridgeProfileState } from './wsl-path-bridge'
 
@@ -17733,24 +17734,32 @@ ipcMain.handle('hermes:savePastedText', async (_event, payload) => {
 })
 
 ipcMain.handle('hermes:saveClipboardImage', async () => {
-  const image = clipboard.readImage()
-
-  if (image && !image.isEmpty()) {
-    return writeComposerImage(image.toPNG(), '.png')
-  }
-
   // WSL2/WSLg doesn't bridge clipboard *images* from the Windows host to the
-  // Linux clipboard Electron reads, so a host screenshot looks empty above.
-  // Pull it straight off the Windows clipboard via PowerShell as a fallback.
+  // Linux clipboard Electron reads, so a host screenshot looks empty to
+  // readImage(). Pull it straight off the Windows clipboard via PowerShell.
   if (IS_WSL) {
+    const image = clipboard.readImage()
+
+    if (image && !image.isEmpty()) {
+      return writeComposerImage(image.toPNG(), '.png')
+    }
+
     const png = readWslWindowsClipboardImage()
 
-    if (png) {
-      return writeComposerImage(png, '.png')
-    }
+    return png ? writeComposerImage(png, '.png') : ''
   }
 
-  return ''
+  const hit = await readDesktopClipboardImage({ clipboard, platform: process.platform })
+
+  if (!hit) {
+    return ''
+  }
+
+  if (hit.kind === 'bytes') {
+    return writeComposerImage(hit.bytes, hit.ext)
+  }
+
+  return hit.paths.length === 1 ? hit.paths[0] : hit.paths
 })
 
 ipcMain.handle('hermes:normalizePreviewTarget', (_event, target, baseDir) =>

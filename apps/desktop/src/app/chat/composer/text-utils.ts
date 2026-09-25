@@ -74,6 +74,76 @@ const INLINE_IMAGE_SRC_RE = /<img\b[^>]*?\bsrc\s*=\s*["'](data:image\/[^"']+)["'
 // Below this, an inline data URL is chrome rather than content — a spacer, a
 // 1×1 tracker, or a blurhash placeholder. Real pasted artwork clears it easily.
 const MIN_INLINE_IMAGE_BYTES = 4096
+// Explorer and screenshot tools often hand the paste a File whose MIME is
+// empty (or application/octet-stream) and whose only image signal is the name.
+const IMAGE_FILE_RE = /\.(png|jpe?g|gif|webp|bmp|tiff?|svg|ico)$/i
+
+/** A clipboard file is an image when its MIME says so, or when Windows left
+ *  the MIME blank and the filename is an image. Other types stay files. */
+export function clipboardFileIsImage(file: { name?: string; type?: string }): boolean {
+  const type = file.type || ''
+
+  if (type.startsWith('image/')) {
+    return true
+  }
+
+  if (type && type !== 'application/octet-stream') {
+    return false
+  }
+
+  return IMAGE_FILE_RE.test(file.name || '')
+}
+
+/** True when every line of a paste is an image path or a bare image filename.
+ *  That is how Windows reports a copied picture (the path in text/plain, the
+ *  pixels elsewhere). A sentence that merely mentions `shot.png` is not. */
+export function textLooksLikeClipboardImagePaths(text: string): boolean {
+  const lines = text
+    .split(/\r?\n/)
+    .map(line => line.trim())
+    .filter(Boolean)
+
+  if (lines.length === 0 || lines.length > 20) {
+    return false
+  }
+
+  return lines.every(isClipboardImagePathLine)
+}
+
+function isClipboardImagePathLine(line: string): boolean {
+  if (line.length > 1024 || !IMAGE_FILE_RE.test(line)) {
+    return false
+  }
+
+  if (/^https?:|^data:/i.test(line)) {
+    return false
+  }
+
+  if (/^file:/i.test(line) || /^(?:[a-zA-Z]:[\\/]|\\\\|[\\/])/.test(line)) {
+    return true
+  }
+
+  return !/[\s\\/]/.test(line)
+}
+
+/** No image bytes in the paste event, but the clipboard may still hold a
+ *  picture: empty (Windows PNG format the DOM never sees) or path-only (a
+ *  copied image file). Prose must not take this branch. */
+export function shouldReadNativeClipboardImage(imageCount: number, pastedText: string): boolean {
+  if (imageCount > 0) {
+    return false
+  }
+
+  const text = pastedText.trim()
+
+  return !text || textLooksLikeClipboardImagePaths(text)
+}
+
+/** The path Windows echoes next to a copied image file. Once the image is
+ *  attached, that path is not text the user meant to insert. */
+export function shouldDropPathEchoText(imageCount: number, pastedText: string): boolean {
+  return imageCount > 0 && textLooksLikeClipboardImagePaths(pastedText)
+}
 
 /** Stable key for paste dedupe — `items` and `files` often mirror the same image as different objects. */
 export function blobDedupeKey(blob: Blob): string {
@@ -105,8 +175,12 @@ export function extractClipboardImageBlobs(clipboard: DataTransfer): Blob[] {
 
   if (clipboard.items?.length) {
     for (const item of clipboard.items) {
-      if (item.kind === 'file' && item.type.startsWith('image/')) {
-        push(item.getAsFile())
+      if (item.kind === 'file') {
+        const file = item.getAsFile()
+
+        if (file && clipboardFileIsImage(file)) {
+          push(file)
+        }
       }
     }
   }
@@ -116,7 +190,7 @@ export function extractClipboardImageBlobs(clipboard: DataTransfer): Blob[] {
     for (let i = 0; i < clipboard.files.length; i += 1) {
       const file = clipboard.files.item(i)
 
-      if (file && file.type.startsWith('image/')) {
+      if (file && clipboardFileIsImage(file)) {
         push(file)
       }
     }
