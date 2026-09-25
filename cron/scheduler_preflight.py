@@ -27,12 +27,26 @@ BLOCKED_CONFIG_SILENT_MARKER = "[blocked_config:silent]"
 _TRANSIENT_NET_EXC_NAMES = frozenset({
     "ConnectError", "ConnectTimeout", "ReadTimeout", "WriteTimeout", "PoolTimeout", "NetworkError",
     "TimeoutException", "ClientConnectorError", "ClientConnectorDNSError", "ServerTimeoutError",
-    "ClientOSError"})
-_DNS_FAILURE_NEEDLES = ("nodename nor servname", "name or service not known")
+    "ClientOSError",
+    # OpenAI SDK wraps DNS/connect failures as APIConnectionError; cron raises the summarized
+    # RuntimeError below when retries exhaust, so the type must be recognized on the cause chain.
+    "APIConnectionError", "APITimeoutError",
+})
+_DNS_FAILURE_NEEDLES = (
+    "nodename nor servname", "name or service not known", "getaddrinfo failed",
+    "no address associated with hostname",
+)
 _TRANSIENT_OSERROR_NEEDLES = _DNS_FAILURE_NEEDLES + (
     "temporary failure in name resolution", "network is unreachable")
 _TRANSIENT_HTTP_NEEDLES = _TRANSIENT_OSERROR_NEEDLES + (
-    "failed to resolve", "connection refused", "timed out", "timeout")
+    "failed to resolve", "connection refused", "timed out", "timeout", "connection error")
+# ``AIAgent._summarize_api_error`` collapses DNS/connect failures into this RuntimeError text
+# before ``_final_response_from_result`` re-raises it without a cause chain. Match it so
+# ``cron.unreachable_retry`` still schedules the Cowork ladder (#email 4da726917a87 2026-09-24).
+_OFFLINE_SUMMARY_NEEDLES = (
+    "can't reach the model provider",
+    "you may be offline",
+)
 _TRANSIENT_ERRNOS = frozenset({
     errno.ECONNREFUSED, errno.ECONNRESET, errno.EHOSTUNREACH, errno.ENETUNREACH, errno.ENETDOWN,
     errno.ETIMEDOUT, errno.EAGAIN})
@@ -58,6 +72,8 @@ def _is_transient_provider_resolve_error(exc: BaseException) -> bool:
         module = type(cur).__module__ or ""
         msg = str(cur).lower()
         if type(cur).__name__ in _TRANSIENT_NET_EXC_NAMES:
+            return True
+        if any(needle in msg for needle in _OFFLINE_SUMMARY_NEEDLES):
             return True
         if any(m in module for m in ("httpx", "httpcore", "aiohttp")) and any(
             needle in msg for needle in _TRANSIENT_HTTP_NEEDLES):

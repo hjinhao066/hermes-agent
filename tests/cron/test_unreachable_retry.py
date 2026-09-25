@@ -7,11 +7,13 @@ ladder never fires past its last rung.
 """
 
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 
 import pytest
 
 from cron import unreachable_retry as ur
 from cron.jobs import create_job, get_job, mark_job_run
+from cron.scheduler_preflight import _is_transient_provider_resolve_error
 
 
 @pytest.fixture
@@ -72,3 +74,26 @@ def test_reaching_the_model_resets_ladder_and_oneshots_never_retry(tmp_cron_home
     assert mark_job_run(once["id"], False, "ConnectError: dns", model_unreachable=True)
     remaining = get_job(once["id"])
     assert remaining is None or remaining.get(ur.STATE_KEY) is None
+
+
+def test_offline_summary_runtimeerror_is_unreachable_failure():
+    """Cron re-raises the agent offline summary as a bare RuntimeError (no cause chain).
+
+    That text must still classify as transient so the Cowork ladder fires — otherwise a
+    host DNS blip waits for the next natural schedule (seen on email evening 4da726917a87).
+    """
+    offline = RuntimeError(
+        "Hermes can't reach the model provider. You may be offline. "
+        "Check your internet connection and try again."
+    )
+    assert _is_transient_provider_resolve_error(offline)
+    agent = SimpleNamespace(session_api_calls=0)
+    assert ur.is_model_unreachable_failure(offline, agent)
+
+    # A successful model call already spent tokens — do not re-arm the ladder.
+    spent = SimpleNamespace(session_api_calls=1)
+    assert not ur.is_model_unreachable_failure(offline, spent)
+
+    # Ordinary agent failures stay off the ladder.
+    assert not _is_transient_provider_resolve_error(RuntimeError("agent reported failure"))
+    assert not ur.is_model_unreachable_failure(RuntimeError("agent reported failure"), agent)

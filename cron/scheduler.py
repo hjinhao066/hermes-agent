@@ -2408,7 +2408,13 @@ def _resolve_cron_agent_setup(job: dict, job_id: str, job_name: str, jc) -> _Cro
 def _construct_cron_agent(AIAgent, job: dict, _cfg: dict, setup: _CronAgentSetup, *, workdir, session_id, session_db):
     runtime = setup.runtime
     pr = _cfg.get("provider_routing") or {}
-    return AIAgent(
+    timeout = job.get("codex_event_stale_timeout_seconds")
+    if timeout is not None:
+        import math
+        timeout = float(timeout)
+        if not math.isfinite(timeout) or timeout <= 0:
+            raise ValueError("codex_event_stale_timeout_seconds must be finite and positive")
+    agent = AIAgent(
         model=setup.model,
         api_key=runtime.get("api_key"),
         base_url=runtime.get("base_url"),
@@ -2440,6 +2446,10 @@ def _construct_cron_agent(AIAgent, job: dict, _cfg: dict, setup: _CronAgentSetup
         session_id=session_id,
         session_db=session_db,
     )
+    # Keep long-prefill jobs from changing the watchdog of concurrent runs.
+    if timeout is not None:
+        agent._codex_event_stale_timeout_seconds = timeout
+    return agent
 
 
 class _FireAudit:
