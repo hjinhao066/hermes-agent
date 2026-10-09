@@ -2012,9 +2012,31 @@ def _final_response_from_result(result: dict, job_id: str, job_name: str, AIAgen
     # Raise so the except handler below builds the proper failure tuple. (issue #17855)
     turn_exit_reason = str(result.get("turn_exit_reason") or "")
     final_response_text = (result.get("final_response") or "").strip()
-    max_iteration_summary = is_max_iteration_handoff(result)
+    # The agent emits non-empty diagnostic text when its iteration-limit summary
+    # fails. That text is an error, not a deliverable fallback report.
+    summary_failed = (
+        final_response_text == "I reached the iteration limit and couldn't generate a summary."
+        or (
+            final_response_text.startswith("I reached the maximum iterations (")
+            and "but couldn't summarize. Error:" in final_response_text
+        )
+        or (
+            final_response_text.startswith("I ran out of steps for this turn (")
+            and "couldn't produce a summary" in final_response_text
+        )
+    )
+    max_iteration_summary = is_max_iteration_handoff(result) and not summary_failed
     if result.get("failed") is True or (result.get("completed") is False and not max_iteration_summary):
         raise RuntimeError(result.get("error") or final_response_text or "agent reported failure")
+    # Report jobs use these explicit first-line failure sentinels so RSS can
+    # quarantine the archive. They are not successful cron runs either.
+    if final_response_text.startswith((
+        "Reviewer 尚未返回明确 APPROVED",
+        "无法生成报告：",
+        "X 午报未生成",
+        "X 晚报采集失败",
+    )):
+        raise RuntimeError(final_response_text)
     if max_iteration_summary:
         logger.warning(
             "Job '%s' reached the iteration limit but produced a final fallback response; "
