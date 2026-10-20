@@ -81,6 +81,22 @@ def _get_script_timeout() -> int:
     return _sched._DEFAULT_SCRIPT_TIMEOUT if resolved is None else resolved
 
 
+def _get_script_timeout_for_path(path: Path) -> int:
+    """Apply a profile-local budget keyed by the validated scripts-relative path."""
+    default = _get_script_timeout()
+    try:
+        scripts_dir = (_sched._get_hermes_home() / "scripts").resolve()
+        key = path.resolve().relative_to(scripts_dir).as_posix()
+        cfg = _sched.load_config() or {}
+        overrides = cfg.get("cron", {}).get("script_timeout_overrides", {})
+        configured = overrides.get(key)
+        if configured is not None:
+            return _positive_int(configured) or default
+    except (AttributeError, TypeError, ValueError, OSError, OverflowError):
+        logger.warning("Invalid cron script timeout override for %s; using default", path.name)
+    return default
+
+
 _DEFAULT_MEDIA_SEND_TIMEOUT = 300
 
 
@@ -376,7 +392,7 @@ def _run_job_script(
     path, err = _resolve_script_path(script_path)
     if path is None:
         return False, err
-    script_timeout = _get_script_timeout()
+    script_timeout = _get_script_timeout_for_path(path)
     argv, env_overlay, err = _script_argv(path)
     if argv is None:
         return False, err
