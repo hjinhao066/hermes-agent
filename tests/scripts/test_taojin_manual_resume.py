@@ -26,3 +26,12 @@ def test_registration_restore_preserves_other_session_changes(tmp_path):
     ledger.write_text(json.dumps([foreign, {'slot': 'ours', 'out': str(out)}]), encoding='utf-8')
     assert runner.restore_registration(ledger, baseline, 'ours', out)['removed_count'] == 1
     assert runner.read(ledger) == [foreign]
+
+
+def test_unsupported_learning_claim_is_audited_and_never_reaches_report():
+    good = {'claim': 'supported', 'seqs': [10], 'queries': ['source']}
+    missing = {'claim': 'unsupported', 'seqs': [], 'queries': ['no source']}
+    water = {'claim': 'not useful', 'seqs': [11], 'queries': ['water']}
+    kept, rejected = runner.supported_candidates([good, missing, water], {'10': '有用', '11': '水帖'})
+    assert kept == [good]
+    assert [r['candidate'] for r in rejected] == [missing, water]
