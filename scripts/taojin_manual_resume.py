@@ -41,6 +41,17 @@ def restore_registration(path, baseline_bytes, slot, out):
     return {'removed_count': len(own), 'matches_baseline': path.read_bytes() == baseline_bytes}
 
 
+def supported_candidates(candidates, labels):
+    useful = {int(seq) for seq, label in labels.items() if label == '有用'}
+    kept, rejected = [], []
+    for candidate in candidates:
+        if candidate['seqs'] and set(candidate['seqs']) <= useful:
+            kept.append(candidate)
+        else:
+            rejected.append({'candidate': candidate, 'reason': 'missing useful source sequence'})
+    return kept, rejected
+
+
 def load_driver(path, out, tools):
     spec = importlib.util.spec_from_file_location('taojin_existing_cn_driver', path)
     driver = importlib.util.module_from_spec(spec)
@@ -117,6 +128,8 @@ def write_report(args, driver):
     report.call = model_call
     first = report.label(session, args.out)
     first['labels'] = daily.fix_labels(session, first['labels'])
+    first['candidates'], rejected = supported_candidates(first['candidates'], first['labels'])
+    save(args.out/'rejected-candidates.json', rejected)
     first['high_value'] = daily.valid_high_value(session, first['labels'], first.get('high_value', []))
     save(args.out/'run-labels.json', {**first, 'account': full['account'], 'fg_guard': result['fg_guard']})
     final = report.write_report(session, first, ab.previous_sessions(driver.dt.date.today()), args.out/'README.md', daily=True)
