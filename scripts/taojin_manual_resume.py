@@ -106,12 +106,23 @@ def write_report(args, driver):
     shutil.copyfile(args.out/'capture'/'fg-guard.json', args.out/'fg-guard.json')
     driver.account_status()
     driver.quota('quota-before-r2.json')
-    report.call = driver.model_call
+    def model_call(prompt, schema, path):
+        context = (f'\n本次运行已验证累计实取100/100，原件9条加续抓91条；'
+                   f'本分析包只含去重后未产出过的{len(session["items"])}条，序号沿用累计采集序号。'
+                   f'不要将分析包不足100条误写成采集未完成。只统计本包标签，累计前50/100条的有用数未在本包提供，勿推算。'
+                   f'单次手动授权下用户前台切换只记录，真实切换{result["foreground_transition_count"]}次；'
+                   f'原判定{result["fg_guard"]}保留，但单次策略验证通过且无浏览器激活证据。'
+                   '不要重复原件9条的学习点，不要要求重跑X。')
+        return driver.model_call(prompt+context, schema, path)
+    report.call = model_call
     first = report.label(session, args.out)
     first['labels'] = daily.fix_labels(session, first['labels'])
     first['high_value'] = daily.valid_high_value(session, first['labels'], first.get('high_value', []))
     save(args.out/'run-labels.json', {**first, 'account': full['account'], 'fg_guard': result['fg_guard']})
     final = report.write_report(session, first, ab.previous_sessions(driver.dt.date.today()), args.out/'README.md', daily=True)
+    label_response = read(args.out/'sonnet-labels-response.json')
+    save(args.out/'labels.json', {'model': label_response['model'], 'provider': label_response['provider'],
+                                 'labels': first['labels']})
     daily.library_append(daily.library_entries(final['library'], session), driver.dt.date.today().isoformat(), ab.LIBRARY)
     prefix = (f'> 本次续抓新增 {result["new_scanned"]} 条，连同原9条累计实取100/100；'
               f'本报告仅投递未产出过的 {len(session["items"])} 条。'
