@@ -1405,6 +1405,12 @@ def _apply_agent_section(agent, _agent_cfg):
         agent._auto_recovery_cycles = max(int(_agent_section.get("auto_recovery_cycles", 5)), 0)
     except (TypeError, ValueError):
         agent._auto_recovery_cycles = 5
+    # Cron-only: end the run on a rate limit whose cooldown is known to be at least this many seconds
+    # and no fallback is left (agent/turn_rate_limit_failfast.py). 0 disables.
+    try:
+        agent._cron_rate_limit_fail_fast_s = max(float(_agent_section.get("cron_rate_limit_fail_fast_seconds", 0)), 0.0)
+    except (TypeError, ValueError):
+        agent._cron_rate_limit_fail_fast_s = 0.0
 
 
 def _positive_int(raw: Any, *, reject: tuple = ()) -> Optional[int]:

@@ -388,6 +388,18 @@ def settle_unrecovered_error(
             base_url=_base, model=_model,
         ))
 
+    # Cron only: a rate limit with a known long cooldown and no fallback left ends the run now (the
+    # next occurrence probes again) instead of sleeping through it while holding the job's claim.
+    from agent.turn_rate_limit_failfast import should_fail_fast
+    if is_rate_limited and should_fail_fast(agent, classified, api_error, error_context):
+        return _verdict("return", max_retries_exhausted_result(
+            agent, api_error, classified, max_retries=retry_count, is_rate_limited=is_rate_limited,
+            error_msg=error_msg, api_kwargs=api_kwargs, api_messages=api_messages,
+            messages=messages, conversation_history=conversation_history,
+            api_call_count=api_call_count, approx_tokens=approx_tokens, provider=_provider,
+            base_url=_base, model=_model,
+        ))
+
     wait_time = compute_error_backoff(
         agent, api_error, retry_count=retry_count, max_retries=max_retries,
         is_rate_limited=is_rate_limited, is_zai_coding_overload=_is_zai_coding_overload,
