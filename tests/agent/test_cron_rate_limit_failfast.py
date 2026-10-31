@@ -71,6 +71,21 @@ def _settle(monkeypatch, agent, api_error):
     return verdict, terminal, slept
 
 
+@pytest.mark.parametrize("agent_cfg, expected", [({}, 0.0), ({"cron_rate_limit_fail_fast_seconds": 120}, 120.0),
+                                                   ({"cron_rate_limit_fail_fast_seconds": "junk"}, 0.0)])
+def test_config_key_reaches_the_agent(agent_cfg, expected):
+    from unittest.mock import patch
+    from run_agent import AIAgent
+
+    cfg = {"agent": agent_cfg}
+    with patch("agent.process_bootstrap.OpenAI"), \
+         patch("hermes_cli.config.load_config", return_value=cfg), \
+         patch("hermes_cli.config.load_config_readonly", return_value=cfg):
+        built = AIAgent(api_key="test-key", base_url="https://openrouter.ai/api/v1", model="test/model",
+                        quiet_mode=True, skip_context_files=True, skip_memory=True)
+    assert built._cron_rate_limit_fail_fast_s == expected
+
+
 def test_cron_run_returns_instead_of_sleeping_on_long_cooldown(monkeypatch):
     verdict, terminal, slept = _settle(monkeypatch, _agent(), _429(600))
     assert verdict.action == "return" and verdict.result is terminal
