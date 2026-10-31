@@ -23,11 +23,17 @@ def _429(retry_after=None):
     return err
 
 
-def _agent(platform="cron", threshold=120):
+def _agent(platform="cron", threshold=120, fallback_left=False, pool=None):
     agent = MagicMock()
     agent.platform = platform
     agent._cron_rate_limit_fail_fast_s = threshold
+    agent._has_pending_fallback.return_value = fallback_left
+    agent._credential_pool = pool
     return agent
+
+
+def _pool(entries=1, available=True):
+    return SimpleNamespace(entries=lambda: [object()] * entries, has_available=lambda: available)
 
 
 def _classified(reason=FailoverReason.rate_limit):
@@ -53,13 +59,24 @@ def test_should_fail_fast_gate(platform, threshold, retry_after, reason, expecte
     assert should_fail_fast(_agent(platform, threshold), _classified(reason), _429(retry_after), None) is expected
 
 
+@pytest.mark.parametrize("agent_kwargs, expected", [
+    ({}, True),                                          # nothing left: no fallback, no pool
+    ({"pool": _pool(entries=1)}, True),                  # one credential: rotation has nowhere to go
+    ({"pool": _pool(entries=2)}, False),                 # two credentials: retry once, then rotate
+    ({"pool": _pool(entries=2, available=False)}, True),  # both benched: rotation cannot help
+    ({"fallback_left": True}, False),                    # a fallback provider is still queued
+    ({"fallback_left": True, "pool": _pool(entries=2)}, False),
+])
+def test_should_fail_fast_waits_for_rotation_and_fallback(agent_kwargs, expected):
+    assert should_fail_fast(_agent(**agent_kwargs), _classified(), _429(600), None) is expected
+
+
 def _settle(monkeypatch, agent, api_error):
     terminal = {"final_response": None, "failed": True}
     slept = []
     monkeypatch.setattr(turn_api_error, "max_retries_exhausted_result", lambda *a, **k: terminal)
     monkeypatch.setattr(turn_api_error, "compute_error_backoff", lambda *a, **k: 600.0)
     monkeypatch.setattr(turn_api_error, "interruptible_backoff_sleep", lambda *a, **k: slept.append(a[1]))
-    agent._fallback_index, agent._fallback_chain = 0, []
     verdict = turn_api_error.settle_unrecovered_error(
         agent, api_error=api_error, classified=_classified(), _retry=MagicMock(restart_with_redirected_messages=False),
         status_code=429, error_msg="429", is_context_length_error=False, is_rate_limited=True,
@@ -90,6 +107,11 @@ def test_cron_run_returns_instead_of_sleeping_on_long_cooldown(monkeypatch):
     verdict, terminal, slept = _settle(monkeypatch, _agent(), _429(600))
     assert verdict.action == "return" and verdict.result is terminal
     assert slept == []
+
+
+def test_cron_run_with_a_rotatable_pool_still_backs_off(monkeypatch):
+    verdict, _terminal, slept = _settle(monkeypatch, _agent(pool=_pool(entries=2)), _429(600))
+    assert verdict.action == "fallthrough" and slept == [600.0]
 
 
 def test_chat_surface_still_sleeps_through_the_same_429(monkeypatch):

@@ -32,11 +32,20 @@ def known_cooldown_seconds(api_error: Any, error_context: Any) -> Optional[float
 
 
 def should_fail_fast(agent: Any, classified: Any, api_error: Any, error_context: Any) -> bool:
-    """True when this cron turn should end on a rate limit instead of sleeping through it."""
+    """True when this cron turn should end on a rate limit instead of sleeping through it.
+
+    Only once rotation and fallback are out of options: a pending fallback entry or a credential pool
+    that can still rotate (the same test ``route_classified_error`` uses for its eager fallback) keeps
+    the ordinary recovery path, so a pool of two credentials never loses its turn to this gate.
+    """
     threshold = float(getattr(agent, "_cron_rate_limit_fail_fast_s", 0) or 0)
     if threshold <= 0 or str(getattr(agent, "platform", "") or "").lower() != "cron":
         return False
     if classified.reason not in _FAIL_FAST_REASONS:
+        return False
+    from run_agent import _pool_may_recover_from_rate_limit
+
+    if agent._has_pending_fallback() or _pool_may_recover_from_rate_limit(getattr(agent, "_credential_pool", None)):
         return False
     cooldown = known_cooldown_seconds(api_error, error_context)
     return cooldown is not None and cooldown >= threshold
